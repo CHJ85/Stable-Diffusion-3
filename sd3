@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Ensure required dependencies are installed
+if ! command -v yad &> /dev/null; then
+  echo "yad could not be found, installing..."
+  sudo apt-get install yad -y
+fi
+
+if ! command -v jq &> /dev/null; then
+  echo "jq could not be found, installing..."
+  sudo apt-get install jq -y
+fi
+
+# Get user input via YAD dialog
+input=$(yad --form --title="Image Generation" \
+  --field="Prompt" "scooby doo eating ice cream" \
+  --field="CFG:NUM!1..20" "3.5" \
+  --field="Steps:NUM!1..100" "28" \
+  --field="Aspect Ratio:CB" "1:1!16:9!21:9!3:2!2:3!4:5!5:4!9:16!9:21" \
+  --field="Output Quality:NUM!1..100" "90" \
+  --field="Negative Prompt" "" \
+  --field="Prompt Strength:NUM!0..1!0.05" "0.85" \
+  --field="Seed:NUM!0..1000000" "")
+
+# Extract user inputs
+IFS="|" read -r prompt cfg steps aspect_ratio output_quality negative_prompt prompt_strength seed <<< "$input"
+
+# Prepare the JSON payload
+json_payload=$(jq -n \
+  --arg prompt "$prompt" \
+  --arg cfg "$cfg" \
+  --arg steps "$steps" \
+  --arg aspect_ratio "$aspect_ratio" \
+  --arg output_quality "$output_quality" \
+  --arg negative_prompt "$negative_prompt" \
+  --arg prompt_strength "$prompt_strength" \
+  --arg seed "$seed" \
+  '{
+    input: {
+      prompt: $prompt,
+      cfg: ($cfg | tonumber),
+      steps: ($steps | tonumber),
+      aspect_ratio: $aspect_ratio,
+      output_quality: ($output_quality | tonumber),
+      negative_prompt: $negative_prompt,
+      prompt_strength: ($prompt_strength | tonumber),
+      seed: (if $seed != "" then ($seed | tonumber) else null end)
+    }
+  }')
+
+# Send the initial request to start the image generation
+response=$(curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "$json_payload" \
+  "https://replicate.com/api/models/stability-ai/stable-diffusion-3/predictions")
+
+# Extract the ID from the response
+id=$(echo "$response" | jq -r '.id')
+
+# Debugging statement to check response ID
+echo "Response ID: $id"
+
+# Construct the status URL
+status_url="https://replicate.com/api/predictions/$id"
+
+# Initialize a flag to track if the image URL has been opened
+opened_image_url=false
+
+# Function to check the status of the image generation
+check_status() {
+  status_response=$(curl -s "$status_url")
+  status=$(echo "$status_response" | jq -r '.status')
+
+  # Debugging statement to check status response
+  echo "Status Response: $status_response"
+
+  if [ "$status" == "succeeded" ]; then
+    if [ "$opened_image_url" = false ]; then
+      # Extract the image URL and print it
+      image_url=$(echo "$status_response" | jq -r '.output[0]')
+      xdg-open "$image_url"
+      opened_image_url=true
+    fi
+  elif [ "$status" == "failed" ]; then
+    exit 1
+  else
+    echo "Status: $status. Checking again in 5 seconds..."
+    sleep 5
+    check_status
+  fi
+}
+
+# Start checking the status
+check_status
